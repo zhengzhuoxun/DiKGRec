@@ -1,1 +1,1 @@
-# DifReRec
+# DiKGRec
