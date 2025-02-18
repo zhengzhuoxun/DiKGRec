@@ -64,7 +64,8 @@ class Coach:
 
 	def prepareModel(self):
 		self.model = DiKGRec(args, self.handler.trnMat, self.handler.kg_mat_sparse_list).cuda()
-		self.model_opt = torch.optim.Adam(self.model.parameters(), weight_decay=0)
+		# self.model_opt = torch.optim.Adam(self.model.parameters(), weight_decay=0)
+		self.model_opt = torch.optim.Adam(self.model.param_groups)
 
 		par_num1 = sum([param.nelement() for param in self.model.parameters()]) 
 		print("Number of all parameters:", par_num1)
@@ -73,7 +74,7 @@ class Coach:
 
 	def trainEpoch(self):
 		self.model.train()
-		epDfLoss, epKgLoss, epLoss = 0, 0, 0
+		epDfLoss, epKgLoss, epTransLoss, epLoss = 0, 0, 0, 0
 
 		diffusionLoader = self.handler.diffusionLoader
 
@@ -81,12 +82,13 @@ class Coach:
 			batch, index = batch.cuda(), index.cuda()
 			self.model_opt.zero_grad()
 
-			kg_loss, diff_loss, total_loss = self.model.training_losses(batch)
+			kg_loss, diff_loss, trans_loss, total_loss = self.model.training_losses(batch, index)
 
 			loss = total_loss.mean() 
 
 			epKgLoss += kg_loss.mean().item()
 			epDfLoss += diff_loss.mean().item()
+			epTransLoss += trans_loss.mean().item()
 			epLoss += total_loss.mean().item()
 
 			loss.backward()
@@ -100,6 +102,7 @@ class Coach:
 		ret = dict()
 		ret['epLoss'] = epLoss 
 		ret['epDfLoss'] = epDfLoss 
+		ret['epfTransLoss'] = epTransLoss 
 		ret['epKgLoss'] = epKgLoss 
 		return ret
 	
@@ -113,7 +116,7 @@ class Coach:
 		with torch.no_grad():
 			for i, (idx, usr, trnMask) in enumerate(tstLoader):
 				trnMask = trnMask.float().cuda()
-				prediction_batch = self.model.inference(trnMask).cpu()
+				prediction_batch = self.model.inference(trnMask, idx).cpu()
 				
 				prediction_batch = prediction_batch - trnMask.cpu() * 1e8
 				_, topLocs = t.topk(prediction_batch, args.topk)

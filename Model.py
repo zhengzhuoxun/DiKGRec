@@ -21,6 +21,9 @@ class DiKGRec(nn.Module):
 		self.item = args.item
 		self.head = args.head
 		self.relation = args.relation
+		self.kg_weight = args.kg_loss_ratio
+		self.trans_ratio = args.trans_ratio
+		self.sampling_N = args.sampling_N
 
 		self.usrEmb = torch.empty(self.user, self.head).cuda()
 
@@ -33,10 +36,10 @@ class DiKGRec(nn.Module):
                     list(self.emb_layer.parameters()) +
                     [p for layer in self.in_layers for p in layer.parameters()] +
                     [p for layer in self.out_layers for p in layer.parameters()]
-                ), 'lr': args.lr},
+                ), 'lr': args.lr, 'weight_decay': 0},
             {'params': (
                     [self.relEmb]
-                ), 'lr': args.lr2}
+                ), 'lr': args.lr2, 'weight_decay': 0}
         ]
 
 
@@ -45,6 +48,7 @@ class DiKGRec(nn.Module):
 		self.kgMatList = kgMatSparseList 
 		self.layer = args.layer
 		self.updateW = args.updateW
+		self.oriW = args.oriW
 	
 	def buildDiffusion(self, args, beta_fixed):
 		self.noise_scale = args.noise_scale
@@ -126,10 +130,7 @@ class DiKGRec(nn.Module):
 		self.posterior_mean_coef1 = (self.betas * torch.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod))
 		self.posterior_mean_coef2 = ((1.0 - self.alphas_cumprod_prev) * torch.sqrt(alphas) / (1.0 - self.alphas_cumprod))
 
-	def p_sample(self, x_start, idx, steps):
-		if args.diff_type == 0:
-			steps += 1
-
+	def p_sample(self, x_start, steps):
 		if steps == 0:
 			x_t = x_start
 		else:
@@ -215,8 +216,7 @@ class DiKGRec(nn.Module):
 				for i, kgMat in enumerate(self.kgMatList):
 					neighbor_sum_r = torch.sparse.mm(kgMat.cuda(), entEmb_h) # [E, E] * [E, uB]
 					neighbor_weighted_sum += neighbor_sum_r * normalized_relEmb[i]
-				# entEmb_h += neighbor_weighted_sum * self.updateW
-				entEmb_h = neighbor_weighted_sum
+				entEmb_h = entEmb_h* self.oriW + neighbor_weighted_sum * self.updateW
 			itEmb_h = entEmb_h[:self.item, :] # [item, uBatchSize]
 			usr_pred_h = itEmb_h.T # [uBatchSize, item]
 
@@ -234,6 +234,10 @@ class DiKGRec(nn.Module):
 		
 		return final_output
 	
+	def error(self, x_start, out):
+		mse = self.mean_flat((out - x_start) ** 2)
+		return mse
+	
 
 	def noise_filter(self, mat, ratio = 0.2):
 		with torch.no_grad():
@@ -244,30 +248,45 @@ class DiKGRec(nn.Module):
 			indices_to_zero = ones_indices[torch.randperm(num_ones)[:to_filter]]
 			filteredMat[indices_to_zero[:, 0], indices_to_zero[:, 1]] = 0
 		return filteredMat.detach(), indices_to_zero.detach()
+	
+	def bernoulli_filter(self, mat, ratio=0.2, N=10):
+		with torch.no_grad():
+			results = []
+			for i in range(N):
+				torch.manual_seed(torch.seed() + i) 
+				mask = (torch.rand_like(mat, dtype=torch.float) < ratio).int().cuda()  
+				filteredMat = mat * (1 - mask)
+				results.append(filteredMat.detach())
+		return results, mask
 
 	def training_losses(self, x_start, batch_index):
-		mat, indices_to_zero = self.noise_filter(x_start, args.noise_ratio)
-		# print('after noise, diff: ', (mat-x_start).sum())
-		# aggregation_time = time.time()
-		kgPred = self.kgAggregation(mat, x_start, batch_index)
-		# aggregation_time = time.time() - aggregation_time
-		kgPred = kgPred[indices_to_zero[:, 0], indices_to_zero[:, 1]]
-
-		tar = x_start[indices_to_zero[:, 0], indices_to_zero[:, 1]]
-		kg_loss = self.mean_flat((tar - kgPred) ** 2)
-		head_diff = self.head_diff()
-
-		kg_loss += args.head_diff_ratio * head_diff / 1000
-
+		# mat, indices_to_zero = self.noise_filter(x_start, args.noise_ratio)
 		batch_size = x_start.size(0)
+		mat_list, indices_to_zero = self.bernoulli_filter(x_start, args.noise_ratio, self.sampling_N)
+
+		kg_in = mat_list[0]
+		di_in = mat_list[1]
+
+		if self.kg_weight != 0:
+			kgPred = self.kgAggregation(mat_list[0], x_start, batch_index)
+			
+			kg_loss = self.error(x_start, kgPred)
+
+			head_diff = self.head_diff()
+
+			kg_loss += args.head_diff_ratio * head_diff 
+		else:
+			kg_loss = torch.zeros(batch_size).cuda()
+
+		
 		noise = torch.randn_like(x_start)
 
 		if args.diff_type == 0:
 			diff_input = x_start
-			ts = torch.randint(0, self.steps, (batch_size,)).long().cuda()
 		else:
-			diff_input = mat
-			ts = torch.randint(0, self.steps+1, (batch_size,)).long().cuda()
+			diff_input = mat_list[1]
+		
+		ts = torch.randint(0, self.steps, (batch_size,)).long().cuda()
 
 		if self.noise_scale != 0:
 			x_t = self.q_sample(diff_input, ts, noise)
@@ -280,20 +299,20 @@ class DiKGRec(nn.Module):
 		
 		diff_mse = self.mean_flat((diff_input - diffPred) ** 2)
 
-		if args.diff_type == 0:
-			weight = torch.where((ts == 0), 1.0, weight)
-
-		else:
-			weight = torch.where((ts == 0), 1.0, weight)
-			weight = torch.where(((ts == 0)| (ts== 1)), 1.0, weight)
-			diff_mse = torch.where((ts == 0), self.mean_flat((x_start - diffPred) ** 2), diff_mse)
-
+		
+		weight = torch.where((ts == 0), 1.0, weight)
 		diff_loss = weight * diff_mse 
 
+		trans_loss = torch.zeros(batch_size).cuda()
 
-		modelWeight = torch.softmax(self.modelWeight, dim=0).cuda()
-		loss = modelWeight[0] * kg_loss + modelWeight[1] * diff_loss
-		return kg_loss, diff_loss, loss
+		if args.diff_type != 0:
+			stacked_mats = torch.stack(mat_list, dim=0) # [N, batch, item]
+			trans_diff = ((stacked_mats - x_start) ** 2).sum(dim=2) # [N, batch]
+			trans_loss = trans_diff.mean(dim=0)  # [batch]
+			trans_loss = trans_loss * self.trans_ratio
+
+		loss = self.kg_weight * kg_loss + (1-self.kg_weight) * (diff_loss + trans_loss)
+		return kg_loss, diff_loss, trans_loss, loss
 	
 		
 	def mean_flat(self, tensor):
@@ -308,8 +327,7 @@ class DiKGRec(nn.Module):
 		kgOut = self.kgAggregation(mat, mat, batch_index, 1)
 		diffOut = self.p_sample(mat, args.sampling_steps)
 
-		modelWeight = torch.softmax(self.modelWeight, dim=0).cuda()
-		out = modelWeight[0] * kgOut + modelWeight[1] * diffOut
+		out = self.kg_weight * kgOut + (1-self.kg_weight) * diffOut
 
 		return out
 	
@@ -318,5 +336,4 @@ class DiKGRec(nn.Module):
 		variance_loss = - torch.sum((self.relEmb - mean_emb) ** 2)
 
 		return variance_loss
-	
 	

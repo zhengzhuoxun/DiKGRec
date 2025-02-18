@@ -24,6 +24,7 @@ def ParseArgs():
 	parser.add_argument('--noise_min', type=float, default=0.0005)
 	parser.add_argument('--noise_max', type=float, default=0.005)
 	parser.add_argument('--sampling_steps', type=int, default=0)
+	parser.add_argument('--sampling_N', type=int, default=20)
 
 	parser.add_argument('--head', type=int, default=2)
 
@@ -32,6 +33,7 @@ def ParseArgs():
 	parser.add_argument('--kg_norm', default=2, type=int)
 	parser.add_argument('--layer', default=4, type=int)
 	parser.add_argument('--updateW', default=1, type=float, help='in KG aggregator')
+	parser.add_argument('--oriW', default=0, type=float, help='in KG aggregator')
 	parser.add_argument('--noise_ratio', default=0.2, type=float)
 	parser.add_argument('--kg_loss_ratio', default=0.4, type=float)
 	parser.add_argument('--head_diff_ratio', default=0, type=float)
@@ -39,6 +41,7 @@ def ParseArgs():
 	parser.add_argument('--cold_start_num', default=0, type=int)
 
 	parser.add_argument('--diff_type', type=int, default=0)
+	parser.add_argument('--trans_ratio', default=0, type=float)
 
 	return parser.parse_args()
 args = ParseArgs()
