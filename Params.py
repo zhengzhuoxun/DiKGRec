@@ -4,7 +4,7 @@ def ParseArgs():
 	parser = argparse.ArgumentParser(description='Model Params')
 	parser.add_argument('--lr', default=5e-5, type=float, help='learning rate')
 	parser.add_argument('--lr2', default=5e-5, type=float, help='learning rate')
-	parser.add_argument('--batch', default=400, type=int, help='batch size')
+	parser.add_argument('--batch', default=100, type=int, help='batch size')
 	parser.add_argument('--tstBat', default=512, type=int, help='number of users in a testing batch')
 	parser.add_argument('--epoch', default=1000, type=int, help='number of epochs')
 	parser.add_argument('--save_path', default='tem', help='file name to save model and training record')
